@@ -115,3 +115,7 @@ The UI is a thin client over a local JSON API:
 - `results/`: one JSON per run: config (model, max_tokens, temperature, system, group, base_url, prompts sha), summary, results
 
 Abliterated-model prompts are for **authorized / own-code** security review comparisons only.
+
+## License
+
+[MIT](LICENSE)
