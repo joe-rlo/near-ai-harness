@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NEAR AI model harness</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --border: #2a3140;
+      --text: #e8ecf4;
+      --muted: #9aa3b5;
+      --accent: #5b8cff;
+      --good: #3ecf8e;
+      --bad: #ff6b7a;
+      --warn: #f5c542;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg); color: var(--text); line-height: 1.45;
+    }
+    main { max-width: 1100px; margin: 0 auto; padding: 24px 20px 64px; }
+    h1 { font-size: 1.35rem; margin: 0 0 4px; font-weight: 650; }
+    .sub { color: var(--muted); margin-bottom: 20px; font-size: 0.95rem; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+    .card {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px;
+    }
+    label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 6px; }
+    select, button, input[type="number"] {
+      width: 100%; background: #0c0e13; color: var(--text); border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 12px; font: inherit;
+    }
+    button {
+      background: var(--accent); border-color: transparent; color: #fff; font-weight: 600;
+      cursor: pointer; margin-top: 12px;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .model-meta { margin-top: 10px; color: var(--muted); font-size: 0.85rem; }
+    .pill {
+      display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.75rem;
+      border: 1px solid var(--border); margin-right: 6px;
+    }
+    .pill.ablit { border-color: var(--warn); color: var(--warn); }
+    .prompts { max-height: 360px; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+    .prompt {
+      display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px;
+      border: 1px solid var(--border); border-radius: 8px; background: #0c0e13;
+    }
+    .prompt input { margin-top: 3px; }
+    .prompt .lbl { font-weight: 600; font-size: 0.9rem; }
+    .prompt .cat { color: var(--muted); font-size: 0.75rem; }
+    .metrics {
+      display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 16px 0;
+    }
+    @media (max-width: 860px) { .metrics { grid-template-columns: repeat(2, 1fr); } }
+    .metric {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px;
+    }
+    .metric .v { font-size: 1.25rem; font-weight: 700; }
+    .metric .k { color: var(--muted); font-size: 0.78rem; margin-top: 2px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; }
+    td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .ok { color: var(--good); }
+    .fail { color: var(--bad); }
+    details pre {
+      white-space: pre-wrap; background: #0c0e13; border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px; max-height: 220px; overflow: auto; font-size: 0.8rem;
+    }
+    .row-actions { display: flex; gap: 8px; margin-top: 8px; }
+    .row-actions button { width: auto; margin: 0; background: transparent; border: 1px solid var(--border); color: var(--text); }
+    .status { color: var(--muted); font-size: 0.85rem; min-height: 1.2em; margin-top: 8px; }
+      .controls { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-top: 12px; }
+    .controls label { margin-bottom: 4px; }
+    textarea {
+      width: 100%; background: #0c0e13; color: var(--text); border: 1px solid var(--border);
+      border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 0.85rem; resize: vertical;
+    }
+    .run-actions { display: flex; gap: 8px; }
+    .run-actions button { flex: 1; }
+    #cancel { background: transparent; border: 1px solid var(--bad); color: var(--bad); }
+    .pending { color: var(--muted); }
+    .refused { color: var(--warn); }
+    .muted { color: var(--muted); }
+    details.sys { margin-top: 10px; font-size: 0.85rem; }
+    details.sys summary { cursor: pointer; color: var(--muted); }
+    .history { margin-top: 12px; }
+    .ghost { width: auto; background: transparent; border: 1px solid var(--border); color: var(--text); margin-top: 8px; }
+    .model-list { max-height: 180px; overflow: auto; margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+    .model-opt, label.inline { display: flex; gap: 8px; align-items: center; color: var(--text); font-size: 0.85rem; margin: 0; }
+    label.inline { margin-bottom: 10px; }
+    .cmp td { min-width: 180px; }
+    .cmp td:first-child { min-width: 140px; }
+    tr.diverge td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+    .only-diff tr:not(.diverge) { display: none; }
+    .cmp { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>NEAR AI model harness</h1>
+  <p class="sub">Pick a model (or several to compare), select prompts, run. Streams each completion to measure TTFT and decode tok/s, scores outputs against each prompt's <code>expect</code>, and flags likely refusals. API key comes from <code>NEARAI_API_KEY</code> on the server.</p>
+
+  <div class="grid">
+    <div class="card">
+      <label for="model">Model</label>
+      <select id="model"></select>
+      <div class="model-meta" id="modelMeta"></div>
+      <details class="sys" id="compareBox">
+        <summary>Compare with <span class="muted" id="compareCount"></span></summary>
+        <div class="model-list" id="compareModels"></div>
+        <button type="button" class="ghost" id="pairBtn">Add base / abliterated counterpart</button>
+      </details>
+      <div class="controls">
+        <div>
+          <label for="maxTokens">max_tokens</label>
+          <input id="maxTokens" type="number" value="2048" min="16" max="32768" />
+        </div>
+        <div>
+          <label for="temperature">temperature</label>
+          <input id="temperature" type="number" value="0.2" min="0" max="2" step="0.1" />
+        </div>
+        <div>
+          <label for="concurrency">concurrency</label>
+          <select id="concurrency">
+            <option>1</option><option selected>4</option><option>8</option>
+          </select>
+        </div>
+      </div>
+      <details class="sys">
+        <summary>System prompt (optional)</summary>
+        <textarea id="system" rows="3" placeholder="Applied to every prompt in the run"></textarea>
+      </details>
+      <div class="row-actions">
+        <button type="button" id="selectAll">Select all prompts</button>
+        <button type="button" id="selectAblit">Abliteration set</button>
+      </div>
+      <div class="run-actions">
+        <button id="run" type="button">Run selected</button>
+        <button id="cancel" type="button" hidden>Cancel</button>
+      </div>
+      <div class="status" id="status"></div>
+      <div class="history">
+        <label for="history">Past runs</label>
+        <select id="history"><option value="">—</option></select>
+      </div>
+    </div>
+    <div class="card">
+      <label>Prompts</label>
+      <div class="prompts" id="prompts"></div>
+    </div>
+  </div>
+
+  <div id="singleView">
+    <div class="metrics" id="summary" hidden>
+      <div class="metric"><div class="v" id="mTtft">—</div><div class="k">Avg TTFT (ms)</div></div>
+      <div class="metric"><div class="v" id="mLatency">—</div><div class="k">Avg latency (ms)</div></div>
+      <div class="metric"><div class="v" id="mP50">—</div><div class="k">P50 / P90 latency (ms)</div></div>
+      <div class="metric"><div class="v" id="mTps">—</div><div class="k">Avg decode tok/s</div></div>
+      <div class="metric"><div class="v" id="mCost">—</div><div class="k">Est. cost (USD)</div></div>
+      <div class="metric"><div class="v" id="mChecks">—</div><div class="k">Checks pass / fail / unscored</div></div>
+      <div class="metric"><div class="v" id="mRefused">—</div><div class="k">Likely refusals</div></div>
+      <div class="metric"><div class="v" id="mOk">—</div><div class="k">HTTP ok / failed</div></div>
+      <div class="metric"><div class="v" id="mRetries">—</div><div class="k">Retries</div></div>
+      <div class="metric"><div class="v" id="mRuns">—</div><div class="k">Prompt runs</div></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <table>
+        <thead>
+          <tr>
+            <th>Prompt</th>
+            <th>Status</th>
+            <th>Check</th>
+            <th>TTFT</th>
+            <th>Latency</th>
+            <th>Tok/s</th>
+            <th>In / out (reason)</th>
+            <th>Cost</th>
+            <th>Output</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr><td colspan="9" class="muted">Run to see per-prompt metrics.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="compareView" hidden>
+    <div class="card" style="margin-top:16px">
+      <table>
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Checks p / f / u</th>
+            <th>Refused</th>
+            <th>Avg TTFT</th>
+            <th>P50 latency</th>
+            <th>Tok/s</th>
+            <th>Cost</th>
+            <th>HTTP fail</th>
+          </tr>
+        </thead>
+        <tbody id="cmpSummary"></tbody>
+      </table>
+    </div>
+    <div class="card cmp" style="margin-top:16px">
+      <label class="inline"><input type="checkbox" id="onlyDiff" /> Only prompts where models differ (refusal or check)</label>
+      <table>
+        <thead id="cmpHead"></thead>
+        <tbody id="cmpRows"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+<script>
+  let models = [];
+  let prompts = [];
+  let historyRuns = [];
+  let abort = null;
+
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  const modelName = (id) => models.find(x => x.id === id)?.name ?? id;
+
+  function fmtMs(v) { return v == null ? "—" : `${v} ms`; }
+  function fmtTps(v) { return v == null ? "—" : `${v}`; }
+  function fmtCost(v) { return v == null ? "—" : `$${Number(v).toFixed(6)}`; }
+  function fmtTok(m) {
+    if (m.prompt_tokens == null && m.completion_tokens == null) return "—";
+    const reason = m.reasoning_tokens ? ` (${m.reasoning_tokens})` : "";
+    return `${m.prompt_tokens ?? "—"} / ${m.completion_tokens ?? "—"}${reason}`;
+  }
+
+  function renderModelMeta() {
+    const m = models.find(x => x.id === $("model").value);
+    if (!m) { $("modelMeta").textContent = ""; return; }
+    const features = (m.supported_features || []).map(f => `<span class="pill">${esc(f)}</span>`).join("");
+    $("modelMeta").innerHTML =
+      `${m.abliterated ? '<span class="pill ablit">abliterated</span>' : '<span class="pill">standard</span>'}${features}` +
+      `<span>ctx ${esc(m.context_length ?? "?")} · in $${esc(m.pricing_input_per_m ?? "?")}/M · out $${esc(m.pricing_output_per_m ?? "?")}/M` +
+      ` <span class="muted">(${esc(m.pricing_source)})</span></span>` +
+      (m.description ? `<div style="margin-top:6px">${esc(m.description)}</div>` : "");
+  }
+
+  function renderModels() {
+    const opt = x => `<option value="${esc(x.id)}">${x.abliterated ? "⚡ " : ""}${esc(x.name)}</option>`;
+    const curated = models.filter(x => x.curated);
+    const other = models.filter(x => !x.curated);
+    $("model").innerHTML = `<optgroup label="Curated">${curated.map(opt).join("")}</optgroup>` +
+      (other.length ? `<optgroup label="Other live models">${other.map(opt).join("")}</optgroup>` : "");
+  }
+
+  // ---- compare selection
+
+  function compareIds() {
+    return [...document.querySelectorAll("#compareModels input:checked")].map(el => el.value);
+  }
+
+  function selectedModels() {
+    const primary = $("model").value;
+    return [primary, ...compareIds().filter(id => id !== primary)];
+  }
+
+  function renderCompareModels() {
+    const keep = new Set(compareIds());
+    const primary = $("model").value;
+    const item = x => `
+      <label class="model-opt">
+        <input type="checkbox" value="${esc(x.id)}" ${keep.has(x.id) ? "checked" : ""} />
+        <span>${x.abliterated ? "⚡ " : ""}${esc(x.name)}</span>
+      </label>`;
+    const rest = models.filter(x => x.id !== primary);
+    const curated = rest.filter(x => x.curated).map(item).join("");
+    const other = rest.filter(x => !x.curated).map(item).join("");
+    $("compareModels").innerHTML = curated + (other ? `<div class="cat" style="margin:6px 0 2px">Other live models</div>${other}` : "");
+    updateCompareCount();
+  }
+
+  function updateCompareCount() {
+    const n = compareIds().length;
+    $("compareCount").textContent = n ? `(${n} selected)` : "";
+    $("run").textContent = n ? `Compare ${n + 1} models` : "Run selected";
+  }
+
+  // Abliterated variants are published as "<base id>-abliterated".
+  function counterpart(id) {
+    const twin = id.endsWith("-abliterated") ? id.slice(0, -"-abliterated".length) : `${id}-abliterated`;
+    return models.some(x => x.id === twin) ? twin : null;
+  }
+
+  // ---- prompts
+
+  function renderPrompts() {
+    $("prompts").innerHTML = prompts.map(p => `
+      <label class="prompt">
+        <input type="checkbox" value="${esc(p.id)}" ${p.category !== "abliteration" ? "checked" : ""} />
+        <span>
+          <div class="lbl">${esc(p.label)}</div>
+          <div class="cat">${esc(p.category)} · ${esc(p.id)}${p.expect ? ` · expects ${esc(p.expect.type)}` : ""}</div>
+        </span>
+      </label>
+    `).join("");
+  }
+
+  function selectedPromptIds() {
+    return [...document.querySelectorAll("#prompts input:checked")].map(el => el.value);
+  }
+
+  // ---- cells shared by both views
+
+  function checkCell(r) {
+    const c = r.check || {};
+    const refused = r.refused ? ' <span class="refused" title="Heuristic refusal match">refused?</span>' : "";
+    const mark = c.pass === true ? '<span class="ok">pass</span>'
+      : c.pass === false ? '<span class="fail">fail</span>'
+      : '<span class="muted">—</span>';
+    return `<span title="${esc(c.detail)}">${mark}</span>${refused}`;
+  }
+
+  function outputCell(r) {
+    const body = r.ok ? (r.content || "") : (r.error || "error");
+    const reasoning = r.reasoning ? `<details><summary>reasoning</summary><pre>${esc(r.reasoning)}</pre></details>` : "";
+    const meta = [r.finish_reason && `finish: ${r.finish_reason}`, r.attempts > 1 && `attempts: ${r.attempts}`,
+      r.completion_id && `id: ${r.completion_id}`, r.check?.detail].filter(Boolean).map(esc).join(" · ");
+    return `<details><summary>view</summary><pre>${esc(body)}</pre>${reasoning}<div class="cat">${meta}</div></details>`;
+  }
+
+  function showView(which) {
+    $("singleView").hidden = which !== "single";
+    $("compareView").hidden = which !== "compare";
+  }
+
+  // ---- single-model view
+
+  function rowHtml(r) {
+    const m = r.metrics || {};
+    const status = r.ok ? '<span class="ok">ok</span>' : `<span class="fail">fail${r.status ? " " + esc(r.status) : ""}</span>`;
+    return `
+      <td><div>${esc(r.prompt_label)}</div><div class="cat">${esc(r.category)}</div></td>
+      <td>${status}</td>
+      <td>${checkCell(r)}</td>
+      <td class="num">${fmtMs(m.ttft_ms)}</td>
+      <td class="num">${fmtMs(m.latency_ms)}</td>
+      <td class="num">${fmtTps(m.tokens_per_sec)}</td>
+      <td class="num">${fmtTok(m)}</td>
+      <td class="num">${fmtCost(m.est_cost_usd)}</td>
+      <td>${outputCell(r)}</td>`;
+  }
+
+  function pendingRows(ids) {
+    $("rows").innerHTML = ids.map(id => {
+      const p = prompts.find(x => x.id === id);
+      return `<tr id="row-${esc(id)}"><td><div>${esc(p.label)}</div><div class="cat">${esc(p.category)}</div></td>` +
+        `<td class="pending" colspan="8">queued…</td></tr>`;
+    }).join("");
+  }
+
+  function renderSummary(s) {
+    $("summary").hidden = false;
+    $("mTtft").textContent = s.ttft_ms_avg ?? "—";
+    $("mLatency").textContent = s.latency_ms_avg ?? "—";
+    $("mP50").textContent = `${s.latency_ms_p50 ?? "—"} / ${s.latency_ms_p90 ?? "—"}`;
+    $("mTps").textContent = s.tokens_per_sec_avg ?? "—";
+    $("mCost").textContent = s.est_cost_usd_total == null ? "—" : `$${Number(s.est_cost_usd_total).toFixed(6)}`;
+    $("mChecks").textContent = `${s.checks_pass} / ${s.checks_fail} / ${s.checks_unscored}`;
+    $("mRefused").textContent = s.refused;
+    $("mOk").textContent = `${s.ok} / ${s.fail}`;
+    $("mRetries").textContent = s.retries;
+    $("mRuns").textContent = s.runs;
+  }
+
+  function renderResults(data) {
+    showView("single");
+    renderSummary(data.summary);
+    $("rows").innerHTML = data.results.map(r => `<tr>${rowHtml(r)}</tr>`).join("");
+  }
+
+  // ---- compare view
+
+  function compareSkeleton(modelIds, rows) {
+    showView("compare");
+    $("cmpSummary").innerHTML = modelIds.map(m =>
+      `<tr><td>${esc(modelName(m))}</td><td class="pending" colspan="7">running…</td></tr>`).join("");
+    $("cmpHead").innerHTML = `<tr><th>Prompt</th>${modelIds.map(m => {
+      const info = models.find(x => x.id === m);
+      const pill = info?.abliterated ? ' <span class="pill ablit">abliterated</span>' : "";
+      return `<th>${esc(modelName(m))}${pill}</th>`;
+    }).join("")}</tr>`;
+    $("cmpRows").innerHTML = rows.map(p => `
+      <tr id="crow-${esc(p.id)}">
+        <td><div>${esc(p.label)}</div><div class="cat">${esc(p.category)}</div></td>
+        ${modelIds.map((_, mi) => `<td id="cell-${mi}-${esc(p.id)}"><span class="pending">queued…</span></td>`).join("")}
+      </tr>`).join("");
+  }
+
+  function cmpCell(r) {
+    const m = r.metrics || {};
+    const status = r.ok ? "" : `<span class="fail">fail${r.status ? " " + esc(r.status) : ""}</span> `;
+    return `${status}${checkCell(r)}` +
+      `<div class="cat">${fmtMs(m.ttft_ms)} ttft · ${fmtMs(m.latency_ms)} · ${fmtTps(m.tokens_per_sec)} tok/s · ${fmtCost(m.est_cost_usd)}</div>` +
+      outputCell(r);
+  }
+
+  // Same rule as server.diverges: models disagree on refusal or on a scored check.
+  function diverges(row) {
+    const rs = row.filter(Boolean);
+    const refusals = new Set(rs.map(r => r.refused).filter(v => v != null));
+    const checks = new Set(rs.map(r => r.check?.pass).filter(v => v != null));
+    return refusals.size > 1 || checks.size > 1;
+  }
+
+  function markDivergence(grid, promptId, n) {
+    const row = Array.from({ length: n }, (_, mi) => grid[promptId]?.[mi]);
+    $(`crow-${promptId}`)?.classList.toggle("diverge", diverges(row));
+  }
+
+  function renderCompareSummary(modelIds, summaries) {
+    $("cmpSummary").innerHTML = modelIds.map((m, i) => {
+      const s = summaries[i];
+      if (!s) return `<tr><td>${esc(modelName(m))}</td><td class="muted" colspan="7">no results</td></tr>`;
+      return `<tr>
+        <td>${esc(modelName(m))}<div class="cat">${esc(m)}</div></td>
+        <td class="num">${s.checks_pass} / ${s.checks_fail} / ${s.checks_unscored}</td>
+        <td class="num ${s.refused ? "refused" : ""}">${s.refused}</td>
+        <td class="num">${fmtMs(s.ttft_ms_avg)}</td>
+        <td class="num">${fmtMs(s.latency_ms_p50)}</td>
+        <td class="num">${fmtTps(s.tokens_per_sec_avg)}</td>
+        <td class="num">${fmtCost(s.est_cost_usd_total)}</td>
+        <td class="num ${s.fail ? "fail" : ""}">${s.fail}</td>
+      </tr>`;
+    }).join("");
+  }
+
+  function renderCompare(runs) {
+    const modelIds = runs.map(d => d.config?.model ?? d.summary?.model);
+    const rows = [];
+    const seen = new Set();
+    const grid = {};
+    runs.forEach((d, mi) => d.results.forEach(r => {
+      if (!seen.has(r.prompt_id)) {
+        seen.add(r.prompt_id);
+        rows.push({ id: r.prompt_id, label: r.prompt_label, category: r.category });
+      }
+      (grid[r.prompt_id] ??= [])[mi] = r;
+    }));
+    compareSkeleton(modelIds, rows);
+    rows.forEach(p => {
+      modelIds.forEach((_, mi) => {
+        const r = grid[p.id][mi];
+        $(`cell-${mi}-${p.id}`).innerHTML = r ? cmpCell(r) : '<span class="muted">not run</span>';
+      });
+      markDivergence(grid, p.id, modelIds.length);
+    });
+    renderCompareSummary(modelIds, runs.map(d => d.summary));
+  }
+
+  // ---- history
+
+  async function loadHistory() {
+    ({ runs: historyRuns } = await fetch("/api/runs").then(r => r.json()));
+    const seenGroups = new Set();
+    const options = [];
+    for (const r of historyRuns) {
+      const s = r.summary || {};
+      if (r.group) {
+        if (seenGroups.has(r.group)) continue;
+        seenGroups.add(r.group);
+        const n = historyRuns.filter(x => x.group === r.group).length;
+        options.push(`<option value="group:${esc(r.group)}">${esc(r.group)} · ${n} models</option>`);
+      } else {
+        options.push(`<option value="${esc(r.file)}">${esc(r.file.replace(/^run-|\.json$/g, ""))} · ` +
+          `${esc(s.checks_pass ?? "?")}✓ ${esc(s.checks_fail ?? "?")}✗</option>`);
+      }
+    }
+    $("history").innerHTML = `<option value="">—</option>` + options.join("");
+  }
+
+  const fetchRun = (file) => fetch(`/api/runs/${encodeURIComponent(file)}`).then(r => r.json());
+
+  async function boot() {
+    const [m, p, h] = await Promise.all([
+      fetch("/api/models").then(r => r.json()),
+      fetch("/api/prompts").then(r => r.json()),
+      fetch("/api/health").then(r => r.json()),
+    ]);
+    models = m.models || [];
+    prompts = p.prompts || [];
+    renderModels();
+    // Prefer newest abliterated DeepSeek by default
+    const prefer = models.find(x => x.id.includes("DeepSeek-V4.1-Flash-1017-abliterated"));
+    if (prefer) $("model").value = prefer.id;
+    renderModelMeta();
+    renderCompareModels();
+    renderPrompts();
+    loadHistory();
+    $("status").textContent = h.has_key
+      ? `Ready · ${h.base_url}`
+      : "Server has no NEARAI_API_KEY — export it, then restart.";
+  }
+
+  function runConfig() {
+    return {
+      max_tokens: Number($("maxTokens").value) || 2048,
+      temperature: Number($("temperature").value),
+      concurrency: Number($("concurrency").value) || 1,
+      system: $("system").value.trim() || null,
+    };
+  }
+
+  async function postJson(url, body, signal) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    return data;
+  }
+
+  async function runPool(jobs, concurrency, handle) {
+    const queue = [...jobs];
+    async function worker() {
+      while (queue.length && !abort.signal.aborted) await handle(queue.shift());
+    }
+    await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, worker));
+  }
+
+  async function runSingle(config, model, ids) {
+    showView("single");
+    $("summary").hidden = true;
+    pendingRows(ids);
+    const started_at = new Date().toISOString();
+    const results = [];
+    let done = 0;
+    await runPool(ids, config.concurrency, async (id) => {
+      const row = $(`row-${id}`);
+      row.cells[1].textContent = "running…";
+      try {
+        const r = await postJson("/api/run_one", { ...config, model, prompt_id: id }, abort.signal);
+        results.push(r);
+        row.innerHTML = rowHtml(r);
+      } catch (e) {
+        row.cells[1].textContent = abort.signal.aborted ? "cancelled" : String(e.message || e);
+      }
+      done++;
+      $("status").textContent = `${done} / ${ids.length} done on ${model}…`;
+    });
+    if (!results.length) throw new Error("No results to save.");
+    // Keep saved order matching prompt order, regardless of completion order.
+    results.sort((a, b) => ids.indexOf(a.prompt_id) - ids.indexOf(b.prompt_id));
+    const data = await postJson("/api/save", { ...config, model, started_at, results });
+    renderSummary(data.summary);
+    return `Saved results/${data.saved}.`;
+  }
+
+  async function runCompare(config, modelIds, ids) {
+    compareSkeleton(modelIds, ids.map(id => prompts.find(x => x.id === id)));
+    const started_at = new Date().toISOString();
+    const group = `cmp-${started_at.replace(/\D/g, "").slice(0, 14)}-${Math.random().toString(16).slice(2, 6)}`;
+    const grid = {};
+    // Interleave so every model progresses at the same rate.
+    const jobs = ids.flatMap(id => modelIds.map((model, mi) => ({ id, model, mi })));
+    let done = 0;
+    await runPool(jobs, config.concurrency, async ({ id, model, mi }) => {
+      const cell = $(`cell-${mi}-${id}`);
+      cell.innerHTML = '<span class="pending">running…</span>';
+      try {
+        const r = await postJson("/api/run_one", { ...config, model, prompt_id: id }, abort.signal);
+        (grid[id] ??= [])[mi] = r;
+        cell.innerHTML = cmpCell(r);
+        markDivergence(grid, id, modelIds.length);
+      } catch (e) {
+        cell.innerHTML = `<span class="pending">${esc(abort.signal.aborted ? "cancelled" : e.message || e)}</span>`;
+      }
+      done++;
+      $("status").textContent = `${done} / ${jobs.length} done across ${modelIds.length} models…`;
+    });
+
+    const summaries = [];
+    let saved = 0;
+    for (const [mi, model] of modelIds.entries()) {
+      const results = ids.map(id => grid[id]?.[mi]).filter(Boolean);
+      if (!results.length) { summaries.push(null); continue; }
+      const data = await postJson("/api/save", { ...config, model, group, group_index: mi, started_at, results });
+      summaries.push(data.summary);
+      saved++;
+    }
+    if (!saved) throw new Error("No results to save.");
+    renderCompareSummary(modelIds, summaries);
+    return `Saved ${saved} runs as ${group}.`;
+  }
+
+  $("model").addEventListener("change", () => { renderModelMeta(); renderCompareModels(); });
+  $("compareModels").addEventListener("change", updateCompareCount);
+  $("pairBtn").onclick = () => {
+    const twin = counterpart($("model").value);
+    if (!twin) {
+      $("status").textContent = "No base/abliterated counterpart for this model.";
+      return;
+    }
+    const el = [...document.querySelectorAll("#compareModels input")].find(x => x.value === twin);
+    if (el) el.checked = true;
+    updateCompareCount();
+  };
+  $("onlyDiff").onchange = () => $("cmpRows").classList.toggle("only-diff", $("onlyDiff").checked);
+  $("selectAll").onclick = () => {
+    document.querySelectorAll("#prompts input").forEach(el => { el.checked = true; });
+  };
+  $("selectAblit").onclick = () => {
+    document.querySelectorAll("#prompts input").forEach(el => {
+      const p = prompts.find(x => x.id === el.value);
+      el.checked = !p || p.category === "abliteration" || p.category === "smoke";
+    });
+  };
+  $("history").onchange = async () => {
+    const value = $("history").value;
+    if (!value) return;
+    if (value.startsWith("group:")) {
+      const group = value.slice("group:".length);
+      const files = historyRuns.filter(r => r.group === group).map(r => r.file).reverse();
+      const runs = (await Promise.all(files.map(fetchRun)))
+        .sort((a, b) => (a.config?.group_index ?? 0) - (b.config?.group_index ?? 0));
+      renderCompare(runs);
+      const c = runs[0]?.config || {};
+      $("status").textContent = `Loaded ${group} · ${runs.length} models · max_tokens ${c.max_tokens ?? "?"} · ` +
+        `temp ${c.temperature ?? "?"} · prompts ${c.prompts_sha ?? "?"}`;
+      return;
+    }
+    const data = await fetchRun(value);
+    renderResults(data);
+    const c = data.config || {};
+    $("status").textContent = `Loaded ${value} · ${c.model ?? data.summary?.model} · ` +
+      `max_tokens ${c.max_tokens ?? "?"} · temp ${c.temperature ?? "?"} · prompts ${c.prompts_sha ?? "?"}`;
+  };
+  $("cancel").onclick = () => abort?.abort();
+
+  $("run").onclick = async () => {
+    const config = runConfig();
+    const modelIds = selectedModels();
+    const ids = selectedPromptIds();
+    if (!ids.length) {
+      $("status").textContent = "Select at least one prompt.";
+      return;
+    }
+    abort = new AbortController();
+    $("run").disabled = true;
+    $("cancel").hidden = false;
+    $("status").textContent = `Running ${ids.length} prompt(s) on ${modelIds.length} model(s)…`;
+    try {
+      const msg = modelIds.length > 1
+        ? await runCompare(config, modelIds, ids)
+        : await runSingle(config, modelIds[0], ids);
+      $("status").textContent = `Done${abort.signal.aborted ? " (cancelled)" : ""}. ${msg}`;
+      loadHistory();
+    } catch (e) {
+      $("status").textContent = String(e.message || e);
+    } finally {
+      $("run").disabled = false;
+      $("cancel").hidden = true;
+    }
+  };
+
+  boot();
+</script>
+</body>
+</html>

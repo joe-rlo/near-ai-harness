@@ -1,0 +1,59 @@
+{
+  "base_url": "https://cloud-api.near.ai/v1",
+  "models": [
+    {
+      "id": "deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated",
+      "name": "DeepSeek V4.1 Flash 1017 Abliterated",
+      "abliterated": true,
+      "context_length": 1048576,
+      "pricing_input_per_m": 0.3,
+      "pricing_output_per_m": 1.2,
+      "description": "DeepSeek V4.1 Flash (October 17, 2026 snapshot) with refusal behavior removed (abliterated), for red teaming, security research and evaluations. Reasoning, coding and tool use, text only, 1M context window. Served privately from NEAR AI's a"
+    },
+    {
+      "id": "Qwen/Qwen3.8-27B-abliterated",
+      "name": "Qwen 3.8 27B Abliterated",
+      "abliterated": true,
+      "context_length": 262144,
+      "pricing_input_per_m": 0.04,
+      "pricing_output_per_m": 1.35,
+      "description": "Qwen 3.8 27B with refusal behavior removed (abliterated), for red teaming, security research and evaluations. Reasoning, tool use, vision and a 262K context window. Served privately from NEAR AI's attested TEE infrastructure."
+    },
+    {
+      "id": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+      "name": "DeepSeek V4.1 Flash 1017",
+      "abliterated": false,
+      "context_length": 1048576,
+      "pricing_input_per_m": 0.3,
+      "pricing_output_per_m": 1.2,
+      "description": "October 17, 2026 snapshot of DeepSeek V4.1 Flash, a reasoning and coding model. Served privately from NEAR AI's attested TEE infrastructure."
+    },
+    {
+      "id": "Qwen/Qwen3.8-27B",
+      "name": "Qwen 3.8 27B",
+      "abliterated": false,
+      "context_length": 262144,
+      "pricing_input_per_m": 0.04,
+      "pricing_output_per_m": 1.35,
+      "description": "Qwen 3.8 27B is a dense FP8 multimodal model with reasoning, coding, tool use, vision, and a 262K context window."
+    },
+    {
+      "id": "deepseek/deepseek-v3.2",
+      "name": "deepseek-v3.2",
+      "abliterated": false,
+      "context_length": 128000,
+      "pricing_input_per_m": 1.1,
+      "pricing_output_per_m": 1.1,
+      "description": "Attested model served via Chutes TEE (verified end-to-end by NEAR AI)."
+    },
+    {
+      "id": "qwen/qwen3.7-max",
+      "name": "Qwen3.7 Max",
+      "abliterated": false,
+      "context_length": 1000000,
+      "pricing_input_per_m": 2.8000000000000003,
+      "pricing_output_per_m": 7.5,
+      "description": "Qwen's most capable proprietary model with 1M context window. Strong at reasoning, coding, math, and multilingual tasks."
+    }
+  ]
+}
