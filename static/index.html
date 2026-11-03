@@ -132,6 +132,8 @@
           </select>
         </div>
       </div>
+      <label for="judge" style="margin-top:12px">Refusal judge</label>
+      <select id="judge"><option value="">Heuristic only (free)</option></select>
       <details class="sys">
         <summary>System prompt (optional)</summary>
         <textarea id="system" rows="3" placeholder="Applied to every prompt in the run"></textarea>
@@ -164,7 +166,7 @@
       <div class="metric"><div class="v" id="mTps">—</div><div class="k">Avg decode tok/s</div></div>
       <div class="metric"><div class="v" id="mCost">—</div><div class="k">Est. cost (USD)</div></div>
       <div class="metric"><div class="v" id="mChecks">—</div><div class="k">Checks pass / fail / unscored</div></div>
-      <div class="metric"><div class="v" id="mRefused">—</div><div class="k">Likely refusals</div></div>
+      <div class="metric"><div class="v" id="mRefused">—</div><div class="k">Refused / partial</div></div>
       <div class="metric"><div class="v" id="mOk">—</div><div class="k">HTTP ok / failed</div></div>
       <div class="metric"><div class="v" id="mRetries">—</div><div class="k">Retries</div></div>
       <div class="metric"><div class="v" id="mRuns">—</div><div class="k">Prompt runs</div></div>
@@ -199,7 +201,7 @@
           <tr>
             <th>Model</th>
             <th>Checks p / f / u</th>
-            <th>Refused</th>
+            <th>Refused / partial</th>
             <th>Avg TTFT</th>
             <th>P50 latency</th>
             <th>Tok/s</th>
@@ -228,6 +230,8 @@
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
   const modelName = (id) => models.find(x => x.id === id)?.name ?? id;
+  // Same as server.refusal_label: runs saved before labels existed only have a bool.
+  const refusalLabel = (r) => r.refusal?.label ?? ({ true: "refused", false: "complied" })[r.refused] ?? null;
 
   function fmtMs(v) { return v == null ? "—" : `${v} ms`; }
   function fmtTps(v) { return v == null ? "—" : `${v}`; }
@@ -253,8 +257,10 @@
     const opt = x => `<option value="${esc(x.id)}">${x.abliterated ? "⚡ " : ""}${esc(x.name)}</option>`;
     const curated = models.filter(x => x.curated);
     const other = models.filter(x => !x.curated);
-    $("model").innerHTML = `<optgroup label="Curated">${curated.map(opt).join("")}</optgroup>` +
+    const groups = `<optgroup label="Curated">${curated.map(opt).join("")}</optgroup>` +
       (other.length ? `<optgroup label="Other live models">${other.map(opt).join("")}</optgroup>` : "");
+    $("model").innerHTML = groups;
+    $("judge").innerHTML = `<option value="">Heuristic only (free)</option>` + groups;
   }
 
   // ---- compare selection
@@ -317,7 +323,10 @@
 
   function checkCell(r) {
     const c = r.check || {};
-    const refused = r.refused ? ' <span class="refused" title="Heuristic refusal match">refused?</span>' : "";
+    const label = refusalLabel(r);
+    const why = r.refusal ? `${r.refusal.source}: ${r.refusal.reason}${r.refusal.judge_error ? ` (judge failed: ${r.refusal.judge_error})` : ""}` : "heuristic";
+    const refused = label === "refused" || label === "partial"
+      ? ` <span class="refused" title="${esc(why)}">${label}</span>` : "";
     const mark = c.pass === true ? '<span class="ok">pass</span>'
       : c.pass === false ? '<span class="fail">fail</span>'
       : '<span class="muted">—</span>';
@@ -370,7 +379,7 @@
     $("mTps").textContent = s.tokens_per_sec_avg ?? "—";
     $("mCost").textContent = s.est_cost_usd_total == null ? "—" : `$${Number(s.est_cost_usd_total).toFixed(6)}`;
     $("mChecks").textContent = `${s.checks_pass} / ${s.checks_fail} / ${s.checks_unscored}`;
-    $("mRefused").textContent = s.refused;
+    $("mRefused").textContent = `${s.refused} / ${s.partial ?? 0}`;
     $("mOk").textContent = `${s.ok} / ${s.fail}`;
     $("mRetries").textContent = s.retries;
     $("mRuns").textContent = s.runs;
@@ -411,7 +420,7 @@
   // Same rule as server.diverges: models disagree on refusal or on a scored check.
   function diverges(row) {
     const rs = row.filter(Boolean);
-    const refusals = new Set(rs.map(r => r.refused).filter(v => v != null));
+    const refusals = new Set(rs.map(refusalLabel).filter(v => v != null));
     const checks = new Set(rs.map(r => r.check?.pass).filter(v => v != null));
     return refusals.size > 1 || checks.size > 1;
   }
@@ -428,7 +437,7 @@
       return `<tr>
         <td>${esc(modelName(m))}<div class="cat">${esc(m)}</div></td>
         <td class="num">${s.checks_pass} / ${s.checks_fail} / ${s.checks_unscored}</td>
-        <td class="num ${s.refused ? "refused" : ""}">${s.refused}</td>
+        <td class="num ${s.refused || s.partial ? "refused" : ""}">${s.refused} / ${s.partial ?? 0}</td>
         <td class="num">${fmtMs(s.ttft_ms_avg)}</td>
         <td class="num">${fmtMs(s.latency_ms_p50)}</td>
         <td class="num">${fmtTps(s.tokens_per_sec_avg)}</td>
@@ -511,6 +520,7 @@
       temperature: Number($("temperature").value),
       concurrency: Number($("concurrency").value) || 1,
       system: $("system").value.trim() || null,
+      judge_model: $("judge").value || null,
     };
   }
 
@@ -618,7 +628,7 @@
   $("selectAblit").onclick = () => {
     document.querySelectorAll("#prompts input").forEach(el => {
       const p = prompts.find(x => x.id === el.value);
-      el.checked = !p || p.category === "abliteration" || p.category === "smoke";
+      el.checked = !p || ["abliteration", "over_refusal", "smoke"].includes(p.category);
     });
   };
   $("history").onchange = async () => {
