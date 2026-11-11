@@ -75,7 +75,8 @@
     .row-actions { display: flex; gap: 8px; margin-top: 8px; }
     .row-actions button { width: auto; margin: 0; background: transparent; border: 1px solid var(--border); color: var(--text); }
     .status { color: var(--muted); font-size: 0.85rem; min-height: 1.2em; margin-top: 8px; }
-      .controls { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-top: 12px; }
+      .controls { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; }
+    @media (max-width: 520px) { .controls { grid-template-columns: 1fr 1fr; } }
     .controls label { margin-bottom: 4px; }
     textarea {
       width: 100%; background: #0c0e13; color: var(--text); border: 1px solid var(--border);
@@ -98,6 +99,9 @@
     .cmp td:first-child { min-width: 140px; }
     tr.diverge td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
     .only-diff tr:not(.diverge) { display: none; }
+    .export { margin-top: 8px; font-size: 0.85rem; color: var(--muted); }
+    .export a { color: var(--accent); }
+    .tag { font-size: 0.78rem; }
     .cmp { overflow-x: auto; }
   </style>
 </head>
@@ -131,9 +135,15 @@
             <option>1</option><option selected>4</option><option>8</option>
           </select>
         </div>
+        <div>
+          <label for="repeat" title="Run every prompt this many times and report rates instead of one sample">samples</label>
+          <input id="repeat" type="number" value="1" min="1" max="20" />
+        </div>
       </div>
       <label for="judge" style="margin-top:12px">Refusal judge</label>
       <select id="judge"><option value="">Heuristic only (free)</option></select>
+      <label class="inline" style="margin-top:10px" title="Fetches NEAR's signature for each completion and checks it covers the exact bytes sent and received, and that the signer is the one in NEAR's attestation report. Does not verify the TEE hardware quote.">
+        <input type="checkbox" id="verify" /> Check response signatures</label>
       <details class="sys">
         <summary>System prompt (optional)</summary>
         <textarea id="system" rows="3" placeholder="Applied to every prompt in the run"></textarea>
@@ -150,6 +160,8 @@
       <div class="history">
         <label for="history">Past runs</label>
         <select id="history"><option value="">—</option></select>
+        <div class="export" id="exportLinks" hidden>Export this run:
+          <a id="exportMd" href="#">Markdown</a> · <a id="exportCsv" href="#">CSV</a></div>
       </div>
     </div>
     <div class="card">
@@ -170,6 +182,8 @@
       <div class="metric"><div class="v" id="mOk">—</div><div class="k">HTTP ok / failed</div></div>
       <div class="metric"><div class="v" id="mRetries">—</div><div class="k">Retries</div></div>
       <div class="metric"><div class="v" id="mRuns">—</div><div class="k">Prompt runs / truncated</div></div>
+      <div class="metric" id="tIncons" hidden><div class="v" id="mIncons">—</div><div class="k">Prompts inconsistent across samples</div></div>
+      <div class="metric" id="tSig" hidden><div class="v" id="mSig">—</div><div class="k">Signatures valid / invalid / unavailable</div></div>
     </div>
 
     <div class="card" style="margin-top:16px">
@@ -235,6 +249,21 @@
   const refusalLabel = (r) => r.refusal?.label ?? ({ true: "refused", false: "complied" })[r.refused] ?? null;
 
   const isTruncated = (r) => r.ok && r.finish_reason === "length";
+
+  // Tag for NEAR's response signature, when it was checked.
+  function sigTag(r) {
+    const sig = r.signature;
+    if (!sig) return "";
+    const [cls, text] = { valid: ["ok", "signed"], invalid: ["fail", "bad signature"] }[sig.status] || ["muted", "unsigned"];
+    return ` <span class="${cls} tag" title="${esc(sig.detail)}">${text}</span>`;
+  }
+
+  function setExport(ref) {
+    $("exportLinks").hidden = !ref;
+    if (!ref) return;
+    $("exportMd").href = `/api/export?format=md&ref=${encodeURIComponent(ref)}`;
+    $("exportCsv").href = `/api/export?format=csv&ref=${encodeURIComponent(ref)}`;
+  }
 
   function fmtMs(v) { return v == null ? "—" : `${v} ms`; }
   // TTFT, plus time to the first visible answer token when the model reasoned first.
@@ -350,7 +379,7 @@
       : '<span class="muted">—</span>';
     const truncated = isTruncated(r)
       ? ' <span class="refused" title="Hit max_tokens before finishing, so it was not scored. Raise max_tokens.">truncated</span>' : "";
-    return `<span title="${esc(c.detail)}">${mark}</span>${truncated}${refused}`;
+    return `<span title="${esc(c.detail)}">${mark}</span>${truncated}${refused}${sigTag(r)}`;
   }
 
   function outputCell(r) {
@@ -368,11 +397,12 @@
 
   // ---- single-model view
 
-  function rowHtml(r) {
+  function rowHtml(r, samples = 1) {
     const m = r.metrics || {};
     const status = r.ok ? '<span class="ok">ok</span>' : `<span class="fail">fail${r.status ? " " + esc(r.status) : ""}</span>`;
+    const sample = samples > 1 ? ` · sample ${(r.sample ?? 0) + 1}/${samples}` : "";
     return `
-      <td><div>${esc(r.prompt_label)}</div><div class="cat">${esc(r.category)}</div></td>
+      <td><div>${esc(r.prompt_label)}</div><div class="cat">${esc(r.category)}${sample}</div></td>
       <td>${status}</td>
       <td>${checkCell(r)}</td>
       <td class="num">${fmtTtft(m)}</td>
@@ -383,11 +413,12 @@
       <td>${outputCell(r)}</td>`;
   }
 
-  function pendingRows(ids) {
-    $("rows").innerHTML = ids.map(id => {
+  function pendingRows(ids, samples) {
+    $("rows").innerHTML = ids.flatMap(id => {
       const p = prompts.find(x => x.id === id);
-      return `<tr id="row-${esc(id)}"><td><div>${esc(p.label)}</div><div class="cat">${esc(p.category)}</div></td>` +
-        `<td class="pending" colspan="8">queued…</td></tr>`;
+      return Array.from({ length: samples }, (_, k) =>
+        `<tr id="row-${esc(id)}-${k}"><td><div>${esc(p.label)}</div><div class="cat">${esc(p.category)}` +
+        `${samples > 1 ? ` · sample ${k + 1}/${samples}` : ""}</div></td><td class="pending" colspan="8">queued…</td></tr>`);
     }).join("");
   }
 
@@ -403,12 +434,18 @@
     $("mOk").textContent = `${s.ok} / ${s.fail}`;
     $("mRetries").textContent = s.retries;
     $("mRuns").textContent = `${s.runs} / ${s.truncated ?? "—"}`;
+    const repeated = s.prompts != null && s.runs > s.prompts;
+    $("tIncons").hidden = !repeated;
+    $("mIncons").textContent = `${s.inconsistent ?? "—"} / ${s.prompts ?? "—"}`;
+    $("tSig").hidden = s.signatures_valid == null;
+    $("mSig").textContent = `${s.signatures_valid ?? 0} / ${s.signatures_invalid ?? 0} / ${s.signatures_unavailable ?? 0}`;
   }
 
   function renderResults(data) {
     showView("single");
     renderSummary(data.summary);
-    $("rows").innerHTML = data.results.map(r => `<tr>${rowHtml(r)}</tr>`).join("");
+    const samples = data.config?.repeat ?? 1;
+    $("rows").innerHTML = data.results.map(r => `<tr>${rowHtml(r, samples)}</tr>`).join("");
   }
 
   // ---- compare view
@@ -429,7 +466,7 @@
       </tr>`).join("");
   }
 
-  function cmpCell(r) {
+  function sampleCell(r) {
     const m = r.metrics || {};
     const status = r.ok ? "" : `<span class="fail">fail${r.status ? " " + esc(r.status) : ""}</span> `;
     return `${status}${checkCell(r)}` +
@@ -438,12 +475,28 @@
       outputCell(r);
   }
 
-  // Same rule as server.diverges: models disagree on refusal or on a scored check.
+  // One prompt on one model: a single result, or counts over its samples plus each sample folded away.
+  function cmpCell(samples, expected = samples.length) {
+    if (expected <= 1 && samples.length === 1) return sampleCell(samples[0]);
+    const count = (f) => samples.filter(f).length;
+    const passed = count(r => r.check?.pass === true), failed = count(r => r.check?.pass === false);
+    const tags = [
+      [count(r => refusalLabel(r) === "refused"), "refused"], [count(r => refusalLabel(r) === "partial"), "partial"],
+      [count(isTruncated), "truncated"], [count(r => !r.ok), "failed"],
+    ].filter(([n]) => n).map(([n, t]) => ` <span class="refused">${n} ${t}</span>`).join("");
+    const waiting = samples.length < expected ? ` <span class="pending">(${samples.length}/${expected} done)</span>` : "";
+    const ordered = [...samples].sort((a, b) => (a.sample ?? 0) - (b.sample ?? 0));
+    return `<span class="${failed ? "fail" : passed ? "ok" : "muted"}">${passed}/${samples.length} passed</span>${tags}${waiting}` +
+      `<details><summary>samples</summary>${ordered.map(r =>
+        `<div style="margin-top:6px"><span class="cat">#${(r.sample ?? 0) + 1}</span> ${sampleCell(r)}</div>`).join("")}</details>`;
+  }
+
+  // Same rule as server.diverges: models differ when the outcomes they produced differ
+  // (refusal labels, or scored checks). Each item is one model's list of samples.
   function diverges(row) {
-    const rs = row.filter(Boolean);
-    const refusals = new Set(rs.map(refusalLabel).filter(v => v != null));
-    const checks = new Set(rs.map(r => r.check?.pass).filter(v => v != null));
-    return refusals.size > 1 || checks.size > 1;
+    const sets = (pick) => new Set(row.filter(c => c?.length)
+      .map(c => [...new Set(c.map(pick).filter(v => v != null))].sort().join("|")).filter(Boolean));
+    return sets(refusalLabel).size > 1 || sets(r => r.check?.pass).size > 1;
   }
 
   function markDivergence(grid, promptId, n) {
@@ -455,8 +508,12 @@
     $("cmpSummary").innerHTML = modelIds.map((m, i) => {
       const s = summaries[i];
       if (!s) return `<tr><td>${esc(modelName(m))}</td><td class="muted" colspan="8">no results</td></tr>`;
+      const notes = [
+        s.prompts != null && s.runs > s.prompts && `${s.inconsistent} of ${s.prompts} prompts inconsistent across samples`,
+        s.signatures_valid != null && `signatures: ${s.signatures_valid} valid · ${s.signatures_invalid} invalid · ${s.signatures_unavailable} unavailable`,
+      ].filter(Boolean).map(t => `<div class="cat">${esc(t)}</div>`).join("");
       return `<tr>
-        <td>${esc(modelName(m))}<div class="cat">${esc(m)}</div></td>
+        <td>${esc(modelName(m))}<div class="cat">${esc(m)}</div>${notes}</td>
         <td class="num">${s.checks_pass} / ${s.checks_fail} / ${s.checks_unscored}</td>
         <td class="num ${s.truncated ? "refused" : ""}">${s.truncated ?? "—"}</td>
         <td class="num ${s.refused || s.partial ? "refused" : ""}">${s.refused} / ${s.partial ?? 0}</td>
@@ -479,13 +536,13 @@
         seen.add(r.prompt_id);
         rows.push({ id: r.prompt_id, label: r.prompt_label, category: r.category });
       }
-      (grid[r.prompt_id] ??= [])[mi] = r;
+      ((grid[r.prompt_id] ??= [])[mi] ??= []).push(r);
     }));
     compareSkeleton(modelIds, rows);
     rows.forEach(p => {
       modelIds.forEach((_, mi) => {
-        const r = grid[p.id][mi];
-        $(`cell-${mi}-${p.id}`).innerHTML = r ? cmpCell(r) : '<span class="muted">not run</span>';
+        const samples = grid[p.id][mi];
+        $(`cell-${mi}-${p.id}`).innerHTML = samples ? cmpCell(samples) : '<span class="muted">not run</span>';
       });
       markDivergence(grid, p.id, modelIds.length);
     });
@@ -544,6 +601,8 @@
       max_tokens: Number($("maxTokens").value) || 8192,
       temperature: Number($("temperature").value),
       concurrency: Number($("concurrency").value) || 1,
+      repeat: Math.max(1, Math.min(20, Math.floor(Number($("repeat").value)) || 1)),
+      verify: $("verify").checked,
       system: $("system").value.trim() || null,
       judge_model: $("judge").value || null,
     };
@@ -572,30 +631,32 @@
   async function runSingle(config, model, ids) {
     showView("single");
     $("summary").hidden = true;
-    pendingRows(ids);
+    pendingRows(ids, config.repeat);
     const started_at = new Date().toISOString();
     // With a run_id the server writes each result to disk as it arrives, so a closed tab loses nothing.
     const run_id = `ui-${started_at.replace(/\D/g, "").slice(0, 14)}-${Math.random().toString(16).slice(2, 6)}`;
+    const jobs = ids.flatMap(id => Array.from({ length: config.repeat }, (_, sample) => ({ id, sample })));
     const results = [];
     let done = 0;
-    await runPool(ids, config.concurrency, async (id) => {
-      const row = $(`row-${id}`);
+    await runPool(jobs, config.concurrency, async ({ id, sample }) => {
+      const row = $(`row-${id}-${sample}`);
       row.cells[1].textContent = "running…";
       try {
-        const r = await postJson("/api/run_one", { ...config, model, run_id, prompt_id: id }, abort.signal);
+        const r = await postJson("/api/run_one", { ...config, model, run_id, prompt_id: id, sample }, abort.signal);
         results.push(r);
-        row.innerHTML = rowHtml(r);
+        row.innerHTML = rowHtml(r, config.repeat);
       } catch (e) {
         row.cells[1].textContent = abort.signal.aborted ? "cancelled" : String(e.message || e);
       }
       done++;
-      $("status").textContent = `${done} / ${ids.length} done on ${model}…`;
+      $("status").textContent = `${done} / ${jobs.length} done on ${model}…`;
     });
     if (!results.length) throw new Error("No results to save.");
     // Keep saved order matching prompt order, regardless of completion order.
-    results.sort((a, b) => ids.indexOf(a.prompt_id) - ids.indexOf(b.prompt_id));
+    results.sort((a, b) => ids.indexOf(a.prompt_id) - ids.indexOf(b.prompt_id) || (a.sample ?? 0) - (b.sample ?? 0));
     const data = await postJson("/api/save", { ...config, model, run_id, started_at, results });
     renderSummary(data.summary);
+    setExport(data.saved);
     return `Saved results/${data.saved}.`;
   }
 
@@ -605,19 +666,21 @@
     const group = `cmp-${started_at.replace(/\D/g, "").slice(0, 14)}-${Math.random().toString(16).slice(2, 6)}`;
     const grid = {};
     // Interleave so every model progresses at the same rate.
-    const jobs = ids.flatMap(id => modelIds.map((model, mi) => ({ id, model, mi })));
+    const jobs = ids.flatMap(id => Array.from({ length: config.repeat }, (_, sample) => sample)
+      .flatMap(sample => modelIds.map((model, mi) => ({ id, model, mi, sample }))));
     let done = 0;
-    await runPool(jobs, config.concurrency, async ({ id, model, mi }) => {
+    await runPool(jobs, config.concurrency, async ({ id, model, mi, sample }) => {
       const cell = $(`cell-${mi}-${id}`);
-      cell.innerHTML = '<span class="pending">running…</span>';
+      const samples = ((grid[id] ??= [])[mi] ??= []);
+      if (!samples.length) cell.innerHTML = '<span class="pending">running…</span>';
       try {
         const r = await postJson("/api/run_one",
-          { ...config, model, group, group_index: mi, run_id: `${group}-${mi}`, prompt_id: id }, abort.signal);
-        (grid[id] ??= [])[mi] = r;
-        cell.innerHTML = cmpCell(r);
+          { ...config, model, group, group_index: mi, run_id: `${group}-${mi}`, prompt_id: id, sample }, abort.signal);
+        samples.push(r);
+        cell.innerHTML = cmpCell(samples, config.repeat);
         markDivergence(grid, id, modelIds.length);
       } catch (e) {
-        cell.innerHTML = `<span class="pending">${esc(abort.signal.aborted ? "cancelled" : e.message || e)}</span>`;
+        if (!samples.length) cell.innerHTML = `<span class="pending">${esc(abort.signal.aborted ? "cancelled" : e.message || e)}</span>`;
       }
       done++;
       $("status").textContent = `${done} / ${jobs.length} done across ${modelIds.length} models…`;
@@ -626,7 +689,7 @@
     const summaries = [];
     let saved = 0;
     for (const [mi, model] of modelIds.entries()) {
-      const results = ids.map(id => grid[id]?.[mi]).filter(Boolean);
+      const results = ids.flatMap(id => [...(grid[id]?.[mi] ?? [])].sort((a, b) => (a.sample ?? 0) - (b.sample ?? 0)));
       if (!results.length) { summaries.push(null); continue; }
       const data = await postJson("/api/save",
         { ...config, model, group, group_index: mi, run_id: `${group}-${mi}`, started_at, results });
@@ -635,6 +698,7 @@
     }
     if (!saved) throw new Error("No results to save.");
     renderCompareSummary(modelIds, summaries);
+    setExport(group);
     return `Saved ${saved} runs as ${group}.`;
   }
 
@@ -669,6 +733,7 @@
       const runs = (await Promise.all(files.map(fetchRun)))
         .sort((a, b) => (a.config?.group_index ?? 0) - (b.config?.group_index ?? 0));
       renderCompare(runs);
+      setExport(group);
       const c = runs[0]?.config || {};
       $("status").textContent = `Loaded ${group} · ${runs.length} models · max_tokens ${c.max_tokens ?? "?"} · ` +
         `temp ${c.temperature ?? "?"} · prompts ${c.prompts_sha ?? "?"}`;
@@ -676,6 +741,7 @@
     }
     const data = await fetchRun(value);
     renderResults(data);
+    setExport(value);
     const c = data.config || {};
     $("status").textContent = `Loaded ${value} · ${c.model ?? data.summary?.model} · ` +
       `max_tokens ${c.max_tokens ?? "?"} · temp ${c.temperature ?? "?"} · prompts ${c.prompts_sha ?? "?"}`;

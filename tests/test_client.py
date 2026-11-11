@@ -1,6 +1,8 @@
 """The API client, run pipeline, incremental saving and HTTP guard, against tests/mock_api.py."""
 
+import csv
 import http.client
+import io
 import json
 import os
 import shutil
@@ -29,6 +31,8 @@ def setUpModule():
     server.RESULTS = _saved["tmp"] / "results"
     os.environ["NEARAI_API_KEY"] = "test-key"
     server._catalog_cache.update(at=0.0, models=None)
+    server._signers_cache.clear()
+    server.SIGNATURE_RETRY_DELAY = 0
     server.Handler.log_message = lambda *args: None
 
 
@@ -57,7 +61,8 @@ class ChatCompletion(unittest.TestCase):
         r = server.chat_completion("mock/echo", USER)
         self.assertTrue(r["ok"])
         self.assertEqual((r["content"], r["finish_reason"], r["attempts"]), ("ping", "stop", 1))
-        self.assertEqual((r["completion_id"], r["inference_id"]), ("chatcmpl-mock", "inf-123"))
+        self.assertTrue(r["completion_id"].startswith("chatcmpl-mock-"))
+        self.assertEqual(r["inference_id"], "inf-123")
         m = r["metrics"]
         self.assertEqual((m["prompt_tokens"], m["completion_tokens"], m["total_tokens"]), (10, 20, 30))
         self.assertIsNotNone(m["ttft_ms"])
@@ -97,7 +102,8 @@ class ChatCompletion(unittest.TestCase):
 
     def test_non_streaming_body_is_understood(self):
         r = server.chat_completion("mock/plain", USER)
-        self.assertEqual((r["content"], r["completion_id"]), ("ping", "chatcmpl-plain"))
+        self.assertEqual(r["content"], "ping")
+        self.assertTrue(r["completion_id"].startswith("chatcmpl-mock-"))
         self.assertIsNone(r["metrics"]["ttft_ms"])
 
     def test_unreachable_server_is_a_failure_not_an_exception(self):
@@ -299,6 +305,223 @@ class PromptSets(unittest.TestCase):
         self.assertEqual(config()["prompts_file"], "prompts.json")
 
 
+class Signatures(unittest.TestCase):
+    def setUp(self):
+        self.mock = _saved["mock"]
+        self.addCleanup(setattr, self.mock, "signature_mode", "ok")
+        self.addCleanup(setattr, self.mock, "attestation_down", False)
+        self.addCleanup(server._signers_cache.clear)
+        server._signers_cache.clear()
+
+    def run_signed(self, model="mock/echo"):
+        return server.run_prompt(config(model, verify=True), prompt())
+
+    def test_hashes_cover_the_exact_bytes_sent_and_received(self):
+        r = server.chat_completion("mock/reasoner", USER)
+        chat_id = r["completion_id"]
+        self.assertEqual((r["request_sha256"], r["response_sha256"]), self.mock.signed[chat_id])
+
+    def test_valid_signature(self):
+        for model in ("mock/echo", "mock/plain"):
+            sig = self.run_signed(model)["signature"]
+            self.assertEqual((sig["status"], sig["kind"], sig["signing_address"]),
+                             ("valid", "gateway", self.mock.gateway_address), model)
+            self.assertEqual((sig["text_matches"], sig["signature_valid"], sig["signer_attested"]), (True, True, True))
+
+    def test_not_checked_unless_asked(self):
+        self.assertNotIn("signature", server.run_prompt(config(), prompt()))
+
+    def test_signature_over_different_bytes_is_invalid(self):
+        self.mock.signature_mode = "tampered"
+        sig = self.run_signed()["signature"]
+        self.assertEqual((sig["status"], sig["text_matches"], sig["signature_valid"]), ("invalid", False, True))
+
+    def test_signature_by_another_key_is_invalid(self):
+        self.mock.signature_mode = "forged"
+        sig = self.run_signed()["signature"]
+        self.assertEqual((sig["status"], sig["text_matches"], sig["signature_valid"]), ("invalid", True, False))
+
+    def test_signer_missing_from_the_attestation_report_is_invalid(self):
+        self.mock.signature_mode = "stranger"
+        sig = self.run_signed()["signature"]
+        self.assertEqual((sig["status"], sig["signature_valid"], sig["signer_attested"]), ("invalid", True, False))
+
+    def test_no_signature_is_unavailable_not_valid(self):
+        for mode in ("missing", "unavailable"):
+            self.mock.signature_mode = mode
+            sig = self.run_signed()["signature"]
+            self.assertEqual(sig["status"], "unavailable", mode)
+            self.assertIn("no signature available", sig["detail"])
+
+    def test_without_an_attestation_report_the_signer_cannot_be_matched(self):
+        self.mock.attestation_down = True
+        sig = self.run_signed()["signature"]
+        self.assertEqual((sig["status"], sig["signature_valid"], sig["signer_attested"]), ("unavailable", True, None))
+
+    def test_summary_counts(self):
+        good = self.run_signed()
+        self.mock.signature_mode = "tampered"
+        bad = self.run_signed()
+        summary = server.summarize(config(), [good, bad])
+        self.assertEqual((summary["signatures_valid"], summary["signatures_invalid"], summary["signatures_unavailable"]),
+                         (1, 1, 0))
+        self.assertIsNone(server.summarize(config(), [server.run_prompt(config(), prompt())])["signatures_valid"])
+
+
+class RubricJudge(unittest.TestCase):
+    RUBRIC = {"type": "judge", "rubric": "Mentions ping."}
+
+    def setUp(self):
+        self.mock = _saved["mock"]
+        self.addCleanup(setattr, self.mock, "rubric_reply", self.mock.rubric_reply)
+
+    def test_judge_grades_the_answer_against_the_rubric(self):
+        r = server.run_prompt(config(judge_model="mock/judge"), prompt(expect=self.RUBRIC))
+        self.assertTrue(r["check"]["pass"])
+        self.assertEqual(r["check"]["detail"], "judge: It covers every point.")
+        request = self.mock.requests[-1]["messages"][1]["content"]
+        self.assertIn("<rubric>\nMentions ping.\n</rubric>", request)
+        self.assertIn("<response>\nping\n</response>", request)
+
+    def test_failed_rubric(self):
+        self.mock.rubric_reply = '{"pass": false, "reason": "Misses the table."}'
+        r = server.run_prompt(config(judge_model="mock/judge"), prompt(expect=self.RUBRIC))
+        self.assertFalse(r["check"]["pass"])
+        self.assertIn("Misses the table.", r["check"]["detail"])
+
+    def test_unscored_without_a_judge_model(self):
+        calls = len(self.mock.requests)
+        r = server.run_prompt(config(), prompt(expect=self.RUBRIC))
+        self.assertIsNone(r["check"]["pass"])
+        self.assertIn("needs a judge model", r["check"]["detail"])
+        self.assertEqual(len(self.mock.requests), calls + 1, "only the model itself was called")
+
+    def test_unscored_when_the_judge_reply_is_unusable(self):
+        self.mock.rubric_reply = "looks fine to me"
+        r = server.run_prompt(config(judge_model="mock/judge"), prompt(expect=self.RUBRIC))
+        self.assertIsNone(r["check"]["pass"])
+        self.assertIn("rubric judge failed", r["check"]["detail"])
+
+    def test_combines_with_other_checks_and_adds_to_judge_cost(self):
+        self.mock.judge_reply, old = '{"label": "complied", "reason": "Did it."}', self.mock.judge_reply
+        self.addCleanup(setattr, self.mock, "judge_reply", old)
+        r = server.run_prompt(config(judge_model="mock/judge"), prompt(expect=[{"type": "complied"}, self.RUBRIC]))
+        self.assertTrue(r["check"]["pass"])
+        one_call = 10 / 1e6 * 1.0 + 20 / 1e6 * 2.0
+        self.assertAlmostEqual(server.summarize(config(), [r])["judge_cost_usd_total"], 2 * one_call)
+
+    def test_truncated_answers_are_not_sent_to_the_judge(self):
+        calls = self.mock.calls.get("mock/judge", 0)
+        r = server.run_prompt(config("mock/truncated", judge_model="mock/judge"), prompt(expect=self.RUBRIC))
+        self.assertTrue(r["check"]["truncated"])
+        self.assertEqual(self.mock.calls.get("mock/judge", 0), calls)
+
+    def test_a_rubric_is_required(self):
+        problems = server.validate_prompts({"prompts": [prompt(expect={"type": "judge"})]})
+        self.assertIn("a judge check needs a `rubric`", "\n".join(problems))
+
+
+def fake(prompt_id, check, label="complied", sample=0, ok=True, finish="stop"):
+    return {"prompt_id": prompt_id, "prompt_label": prompt_id, "category": "test", "sample": sample, "ok": ok,
+            "finish_reason": finish, "content": "x", "check": {"pass": check, "detail": "d"},
+            "refusal": {"label": label, "source": "heuristic"} if label else None, "metrics": {"latency_ms": 100}}
+
+
+class Samples(unittest.TestCase):
+    def test_every_prompt_is_run_repeat_times(self):
+        cfg = config(repeat=3, concurrency=4)
+        results = server.run_matrix([cfg], [prompt(id="one"), prompt(id="two")])[0]
+        self.assertEqual([(r["prompt_id"], r["sample"]) for r in results],
+                         [("one", 0), ("one", 1), ("one", 2), ("two", 0), ("two", 1), ("two", 2)])
+        summary = server.summarize(cfg, results)
+        self.assertEqual((summary["runs"], summary["prompts"], summary["inconsistent"]), (6, 2, 0))
+
+    def test_repeat_is_clamped(self):
+        self.assertEqual(config(repeat=500)["repeat"], server.MAX_REPEAT)
+        self.assertEqual(config(repeat=0)["repeat"], 1)
+        with self.assertRaises(ValueError):
+            config(repeat="many")
+
+    def test_cell_text(self):
+        self.assertEqual(server.cell_text([fake("p", True)]), "PASS")
+        self.assertEqual(server.cell_text([fake("p", False, "refused")]), "FAIL R")
+        self.assertEqual(server.cell_text([fake("p", None, None, finish="length")]), "TRUNC")
+        samples = [fake("p", True), fake("p", True), fake("p", False, "refused"), fake("p", None, None, finish="length")]
+        self.assertEqual(server.cell_text(samples), "2/4 R1 T1")
+
+    def test_inconsistent_prompts_are_counted(self):
+        results = [fake("a", True, sample=0), fake("a", False, sample=1),
+                   fake("b", True, sample=0), fake("b", True, sample=1),
+                   fake("c", True, "complied", 0), fake("c", True, "partial", 1)]
+        self.assertEqual(server.summarize(config(), results)["inconsistent"], 2)
+
+    def test_models_differ_when_their_sample_outcomes_differ(self):
+        steady = [fake("p", True), fake("p", True)]
+        shaky = [fake("p", True), fake("p", False)]
+        self.assertTrue(server.diverges([steady, shaky]))
+        self.assertFalse(server.diverges([steady, list(steady)]))
+        self.assertTrue(server.diverges([steady, [fake("p", True), fake("p", True, "refused")]]))
+        self.assertFalse(server.diverges([steady, [fake("p", None, None, finish="length")]]), "truncated is no opinion")
+
+
+class DiffAndExport(unittest.TestCase):
+    def save(self, model, results, **extra):
+        cfg = config(model, **extra)
+        _, path = server.save_run(cfg, results)
+        return path
+
+    def test_diff_classifies_each_change(self):
+        before = self.save("m", [fake("same", True), fake("broke", True), fake("fixed", False),
+                                 fake("refuses", True), fake("finished", None, None, finish="length"), fake("gone", True)])
+        after = self.save("m", [fake("same", True), fake("broke", False), fake("fixed", True),
+                                fake("refuses", True, "refused"), fake("finished", True), fake("new", True)])
+        pair, = server.diff_runs(server.load_runs(before.name), server.load_runs(str(after)))
+        self.assertEqual({c["prompt_id"]: c["kind"] for c in pair["changes"]},
+                         {"broke": "worse", "fixed": "better", "refuses": "worse", "finished": "better"})
+        self.assertEqual((pair["unchanged"], pair["only_a"], pair["only_b"]), (1, ["gone"], ["new"]))
+        broke = next(c for c in pair["changes"] if c["prompt_id"] == "broke")
+        self.assertEqual((broke["before"], broke["after"]), ("PASS", "FAIL"))
+
+    def test_diff_compares_sample_rates(self):
+        before = self.save("m", [fake("p", True, sample=k) for k in range(4)])
+        after = self.save("m", [fake("p", k < 3, sample=k) for k in range(4)])
+        change, = server.diff_runs(server.load_runs(before.name), server.load_runs(after.name))[0]["changes"]
+        self.assertEqual((change["before"], change["after"], change["kind"]), ("4/4", "3/4", "worse"))
+
+    def test_comparisons_are_paired_by_model(self):
+        for group in ("grp-old", "grp-new"):
+            for i, model in enumerate(("base", "abl")):
+                self.save(model, [fake("p", group == "grp-old" or model == "base")], group=group, group_index=i)
+        pairs = server.diff_runs(server.load_runs("grp-old"), server.load_runs("grp-new"))
+        self.assertEqual([(server._run_model(p["a"]), len(p["changes"])) for p in pairs], [("base", 0), ("abl", 1)])
+
+    def test_unknown_reference(self):
+        with self.assertRaises(ValueError):
+            server.load_runs("no-such-run")
+        with self.assertRaises(ValueError):
+            server.load_runs(str(Path(__file__)), allow_paths=False)
+
+    def test_markdown_export(self):
+        for i, model in enumerate(("base", "abl")):
+            self.save(model, [fake("p1", True), fake("p2", model == "base", "complied" if model == "base" else "refused")],
+                      group="grp-md", group_index=i)
+        text = server.export_markdown(server.load_runs("grp-md"), "grp-md")
+        self.assertIn("# grp-md", text)
+        self.assertIn("| Prompt | Category | base | abl | Differs |", text)
+        self.assertIn("| p1 | test | PASS | PASS |  |", text)
+        self.assertIn("| p2 | test | PASS | FAIL R | yes |", text)
+        self.assertIn("| abl | 1 | 1 | 0 | 0 | 1 | 0 |", text)
+
+    def test_csv_export_has_one_row_per_answer(self):
+        path = self.save("m", [fake("p1", True, sample=0), fake("p1", False, "refused", 1)])
+        rows = list(csv.reader(io.StringIO(server.export_csv(server.load_runs(path.name)))))
+        self.assertEqual(rows[0], server.CSV_COLUMNS)
+        self.assertEqual(len(rows), 3)
+        row = dict(zip(rows[0], rows[2]))
+        self.assertEqual((row["model"], row["prompt_id"], row["sample"], row["check"], row["refusal"], row["latency_ms"]),
+                         ("m", "p1", "1", "fail", "refused", "100"))
+
+
 class HttpGuard(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -358,6 +581,25 @@ class HttpGuard(unittest.TestCase):
         self.assertEqual(self.post("/api/run_one", {}), (400, {"error": "model required"}))
         self.assertEqual(self.post("/api/run_one", {"model": "mock/echo", "prompt_id": "nope"})[0], 400)
         self.assertEqual(self.request("GET", "/api/runs/..%2f..%2fserver.py")[0], 404)
+
+    def test_export_endpoint(self):
+        cfg = config("m")
+        _, path = server.save_run(cfg, [fake("p1", True)])
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        self.addCleanup(conn.close)
+        conn.request("GET", f"/api/export?format=csv&ref={path.name}")
+        resp = conn.getresponse()
+        body = resp.read().decode()
+        self.assertEqual((resp.status, resp.getheader("Content-Type")), (200, "text/csv; charset=utf-8"))
+        self.assertIn(path.name.replace(".json", ".csv"), resp.getheader("Content-Disposition"))
+        self.assertIn("m,p1,test,0,True,pass", body)
+        self.assertEqual(self.request("GET", f"/api/export?ref={path.name}")[0], 200)
+        self.assertEqual(self.request("GET", "/api/export?ref=..%2F..%2Fserver.py")[0], 404)
+        self.assertEqual(self.request("GET", "/api/export?ref=%2Fetc%2Fpasswd")[0], 404)
+
+    def test_run_one_takes_a_sample_number(self):
+        _, r = self.post("/api/run_one", {"model": "mock/echo", "prompt_id": "smoke_hello", "sample": 2})
+        self.assertEqual(r["sample"], 2)
 
     def test_prompts_endpoint_reports_no_problems(self):
         status, body = self.request("GET", "/api/prompts")

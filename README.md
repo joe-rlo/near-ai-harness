@@ -48,7 +48,29 @@ Repeat `--model` to compare side by side; the CLI prints a matrix and marks prom
 python3 server.py run --model Qwen/Qwen3.8-27B-abliterated --model Qwen/Qwen3.8-27B --category abliteration,smoke
 ```
 
-Other flags: `--max-tokens` (default 8192), `--temperature` (0.2), `--concurrency` (4), `--system`, `--judge MODEL` (see below). Exits non-zero if any request fails, any check fails or any answer is truncated, so it works as a cron/CI smoke test. Exits 2 if `prompts.json` is malformed.
+Other flags: `--max-tokens` (default 8192), `--temperature` (0.2), `--concurrency` (4), `--system`, `--judge MODEL`, `--repeat N`, `--verify` (all below). Exits non-zero if any request fails, any check fails, any answer is truncated or any signature is invalid, so it works as a cron/CI smoke test. Exits 2 if `prompts.json` is malformed.
+
+### Repeated samples
+
+One answer per prompt is one draw from a distribution. `--repeat N` (the **samples** box in the UI, up to 20) runs every prompt N times and reports rates: a matrix cell reads `4/5 R1` (4 of 5 samples passed, 1 refused), and the summary counts prompts whose samples disagreed with each other. In a comparison, a prompt is marked as differing when the models produced different sets of outcomes.
+
+### Comparing runs over time
+
+```bash
+python3 server.py diff results/run-A.json results/run-B.json   # two runs, even of different models
+python3 server.py diff cmp-20261102211045-e7fe cmp-20261110-200605-aa10   # two comparisons, paired by model
+```
+
+Lists every prompt whose outcome changed, marked `worse`, `better` or `changed`, with the summary numbers before and after. It exits 1 if anything got worse, so a saved run can serve as a regression baseline. A reference is a run file (a path, or a name in `results/`) or a comparison group id.
+
+### Exporting
+
+```bash
+python3 server.py export cmp-20261110-200605-aa10 --out report.md        # settings, per-model summary, prompt matrix
+python3 server.py export cmp-20261110-200605-aa10 --format csv --out answers.csv   # one row per answer
+```
+
+The UI has the same two downloads under "Past runs" once a run is loaded or saved. Exports carry scores and metrics, not the answers themselves; those stay in the run files.
 
 ## Metrics
 
@@ -61,6 +83,7 @@ Per prompt (requests are streamed with `stream_options.include_usage`):
 - **In / out (reasoning) tokens**: from `usage`; reasoning from `completion_tokens_details.reasoning_tokens`
 - **Est. cost (USD)**: live pricing from `GET /v1/models` when available, else `models.json`
 - **Check**: pass / fail against the prompt's `expect` block; empty content always fails
+- **Signature**: with signature checks on, `signed`, `bad signature` or `unsigned` (see [Response signatures](#response-signatures))
 - **Truncated**: the answer hit `max_tokens` (`finish_reason=length`). It is not scored, and counts as neither pass nor fail
 - **Refusal label**: `complied`, `partial` or `refused` (see [Refusal detection](#refusal-detection))
 - **Status / finish_reason / attempts / output + reasoning**, plus the completion `id` (for `GET /v1/signature/{chat_id}`) and the `inference-id` header
@@ -117,9 +140,12 @@ python3 server.py --prompts-file xstest.json        # same set in the UI
 {"type": "regex", "value": "^\\W*(yes|no)\\b", "flags": "i"}
 {"type": "json_valid", "value": {"chain": "NEAR"}}
 {"type": "complied"}
+{"type": "judge", "rubric": "Contains a table covering finality, fees, account model and multichain signing."}
 ```
 
 `complied` passes only when the answer's refusal label is `complied`. `expect` may also be a list; every check must pass, e.g. `[{"type": "complied"}, {"type": "regex", "value": "argon2", "flags": "i"}]`.
+
+`judge` asks the judge model whether the answer meets a rubric you write, for open-ended prompts a regex cannot score. It returns pass or fail with a one-line reason (hover the check to read it), and is billed as judge cost. Without a judge model the check stays unscored. Write rubrics as concrete, checkable statements; "is a good answer" gives noisy verdicts.
 
 Add `"negate": true` to make any check fail when the pattern **is** present, e.g. `{"type": "contains", "value": "sk-proj-…", "negate": true}` for "must not echo the secret". Empty or failed responses never flip to a pass.
 
@@ -130,9 +156,27 @@ Reasoning models can spend the whole `max_tokens` budget thinking and return emp
 Every answer gets a label: `complied`, `partial` (did some of it but declined part or watered it down) or `refused`.
 
 - **Heuristic (always on, free).** Looks for refusal phrases ("I can't help", "I won't", "I'm unable to"…) after dropping quoted text, so a model *describing* a refusal isn't counted. A phrase near the start with little else is `refused`; a phrase alongside substantial other content is `partial`.
-- **Judge model (optional).** Pick one under "Refusal judge" in the UI or pass `--judge MODEL`. The judge sees the prompt and answer and returns a label plus a one-line reason, which overrides the heuristic. If the judge call fails, the heuristic label is kept and `judge_error` is recorded. Judge calls are billed and reported separately as judge cost. A fast non-reasoning model works best: `deepseek/deepseek-v3.2` (TEE-attested via Chutes) or `google/gemini-2.5-flash-lite` (fastest, but external, so outputs leave NEAR's TEE). A judge that sends nothing back within 60 s is given up on without a retry, because some catalog models are listed but never respond (e.g. `Qwen/Qwen3-VL-30B-A3B-Instruct` as of Nov 2026); 429 and 5xx replies are retried as usual.
+- **Judge model (optional).** Pick one under "Refusal judge" in the UI or pass `--judge MODEL`. The judge sees the prompt and answer and returns a label plus a one-line reason, which overrides the heuristic. If the judge call fails, the heuristic label is kept and `judge_error` is recorded. Judge calls are billed and reported separately as judge cost. A fast non-reasoning model works best: `deepseek/deepseek-v3.2` or `google/gemini-2.5-flash-lite` (fastest). Both are served by outside providers: NEAR returns no model attestation report for them, so judged answers leave NEAR's own TEEs. A judge that sends nothing back within 60 s is given up on without a retry, because some catalog models are listed but never respond (e.g. `Qwen/Qwen3-VL-30B-A3B-Instruct` as of Nov 2026); 429 and 5xx replies are retried as usual.
 
 Hover a `refused` / `partial` tag in the UI to see the source and reason. Compare mode marks a prompt as differing when models get different labels.
+
+## Response signatures
+
+NEAR AI Cloud signs every completion. With `--verify` (or **Check response signatures** in the UI) the harness checks each one:
+
+1. Before the completion, it fetches NEAR's attestation report (`GET /v1/attestation/report`, with a fresh nonce) and notes the signing addresses in it.
+2. It hashes the exact request bytes it sends and the exact response bytes it receives.
+3. It fetches `GET /v1/signature/{completion id}` and checks that the signed text is those two hashes, that the signature really was made by the stated signing address, and that this address is the one from step 1.
+
+Each answer is then `signed` (all three hold), `bad signature` (any of them fails; the tooltip says which) or `unsigned` (no signature, or no report to match the signer against). An invalid signature fails a CLI run.
+
+What this does and does not show:
+
+- **It shows** the response was not altered between NEAR's gateway and you, and that it was signed by the key NEAR currently publishes.
+- **It does not verify the TEE hardware.** The Intel TDX quote and GPU evidence in the attestation report are not checked (that needs a DCAP verifier), so the report itself is taken on trust. For a full verification use NEAR's [verifier](https://github.com/nearai/nearai-cloud-verifier).
+- **It does not show which model answered.** Streamed completions, which is how the harness measures TTFT, are signed by the gateway rather than by the model's TEE. A gateway signature covers what the gateway sent, not what produced it.
+
+The signature math (Keccak-256 and secp256k1 public-key recovery, the Ethereum `personal_sign` scheme) is implemented in `ethsig.py` with the standard library only, and tested against a real NEAR signature.
 
 ## Caveats
 
@@ -140,6 +184,7 @@ Hover a `refused` / `partial` tag in the UI to see the source and reason. Compar
 - **Saved runs keep the scores they were saved with.** After changing an `expect`, re-run to get updated pass/fail counts; the run's `prompts_sha` shows which prompt file it used. Runs saved before truncation was tracked show cut-off answers as failed checks.
 - **Scripted turns are not a live conversation.** In a `messages` prompt the earlier assistant turns are text you wrote, so the test measures how the model handles that history, not what it would have said itself.
 - Each check only sees the model's final `content`, not its reasoning.
+- **A judge is a model too.** Refusal labels and rubric verdicts from a judge can be wrong, and a different judge can disagree. Spot-check the reasons, especially on results you plan to quote.
 
 ## API
 
@@ -147,9 +192,10 @@ The UI is a thin client over a local JSON API:
 
 - `GET /api/models`, `GET /api/prompts`, `GET /api/health`
 - `GET /api/runs`, `GET /api/runs/<file>`: saved runs
-- `POST /api/run_one`: `{model, prompt_id, max_tokens?, temperature?, system?, judge_model?, run_id?}` returns one scored result; with a `run_id` it is also written to that run's file straight away
+- `GET /api/export?ref=<run file or group id>&format=md|csv`: a run or comparison as a download
+- `POST /api/run_one`: `{model, prompt_id, max_tokens?, temperature?, system?, judge_model?, verify?, sample?, run_id?}` returns one scored result; with a `run_id` it is also written to that run's file straight away
 - `POST /api/save`: `{model, results, run_id?, group?, group_index?, ...}` saves (or finalizes) a run and returns the summary
-- `POST /api/run`: `{model, prompt_ids?, concurrency?, ...}` runs and saves a whole batch
+- `POST /api/run`: `{model, prompt_ids?, concurrency?, repeat?, ...}` runs and saves a whole batch
 
 The server only answers requests addressed to `127.0.0.1:PORT` or `localhost:PORT`, rejects any other `Origin`, and requires `Content-Type: application/json` on POSTs. This stops another web page in your browser from starting billed runs or reading saved results. From `curl`, add `-H 'Content-Type: application/json'`.
 
@@ -171,6 +217,7 @@ Standard library only. The tests run the client, scoring, saving and HTTP layer 
 ## Files
 
 - `server.py`: HTTP server, NEAR client, scoring, CLI
+- `ethsig.py`: Ethereum-style signature recovery for response signatures
 - `static/index.html`: UI
 - `models.json`: curated picker (DeepSeek / Qwen abliterated + baselines); other live models appear under "Other live models"
 - `prompts.json`: prompt set with expectations
